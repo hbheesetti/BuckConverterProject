@@ -1,0 +1,90 @@
+open_system('rlwatertank')
+obsInfo = rlNumericSpec([3 1],...
+    LowerLimit=[-inf -inf 10  ]',...
+    UpperLimit=[ inf  inf 100]');
+obsInfo.Name = "observations";
+obsInfo.Description = "integrated error, error, and measured height";
+
+actInfo = rlNumericSpec([1 1]);
+actInfo.Name = "flow";
+env = rlSimulinkEnv("rlwatertank","rlwatertank/RL Agent",...
+    obsInfo,actInfo);
+env.ResetFcn = @(in)localResetFcn(in);
+Ts = 1000;
+Tf = 20000000;
+rng(0)
+statePath = [
+    featureInputLayer(obsInfo.Dimension(1),Name="netObsIn")
+    fullyConnectedLayer(50)
+    reluLayer
+    fullyConnectedLayer(25,Name="CriticStateFC2")];
+
+actionPath = [
+    featureInputLayer(actInfo.Dimension(1),Name="netActIn")
+    fullyConnectedLayer(25,Name="CriticActionFC1")];
+
+commonPath = [
+    additionLayer(2,Name="add")
+    reluLayer
+    fullyConnectedLayer(1,Name="CriticOutput")];
+
+criticNetwork = layerGraph();
+criticNetwork = addLayers(criticNetwork,statePath);
+criticNetwork = addLayers(criticNetwork,actionPath);
+criticNetwork = addLayers(criticNetwork,commonPath);
+
+criticNetwork = connectLayers(criticNetwork, ...
+    "CriticStateFC2", ...
+    "add/in1");
+criticNetwork = connectLayers(criticNetwork, ...
+    "CriticActionFC1", ...
+    "add/in2");
+figure
+plot(criticNetwork)
+criticNetwork = dlnetwork(criticNetwork);
+summary(criticNetwork)
+critic = rlQValueFunction(criticNetwork,obsInfo,actInfo, ...
+    ObservationInputNames="netObsIn", ...
+    ActionInputNames="netActIn");
+getValue(critic, ...
+    {rand(obsInfo.Dimension)}, ...
+    {rand(actInfo.Dimension)})
+actorNetwork = [
+    featureInputLayer(obsInfo.Dimension(1))
+    fullyConnectedLayer(3)
+    tanhLayer
+    fullyConnectedLayer(actInfo.Dimension(1))
+    ];
+actorNetwork = dlnetwork(actorNetwork);
+summary(actorNetwork)
+actor = rlContinuousDeterministicActor(actorNetwork,obsInfo,actInfo);
+
+getAction(actor,{rand(obsInfo.Dimension)})
+agent = rlDDPGAgent(actor,critic);
+agent.SampleTime = Ts;
+
+agent.AgentOptions.TargetSmoothFactor = 1e-3;
+agent.AgentOptions.DiscountFactor = 1.0;
+agent.AgentOptions.MiniBatchSize = 64;
+agent.AgentOptions.ExperienceBufferLength = 1e6; 
+
+agent.AgentOptions.NoiseOptions.Variance = 0.3;
+agent.AgentOptions.NoiseOptions.VarianceDecayRate = 1e-5;
+
+agent.AgentOptions.CriticOptimizerOptions.LearnRate = 1e-03;
+agent.AgentOptions.CriticOptimizerOptions.GradientThreshold = 1;
+agent.AgentOptions.ActorOptimizerOptions.LearnRate = 1e-04;
+agent.AgentOptions.ActorOptimizerOptions.GradientThreshold = 1;
+
+getAction(agent,{rand(obsInfo.Dimension)})
+trainOpts = rlTrainingOptions(...
+    MaxEpisodes=5000, ...
+    MaxStepsPerEpisode=ceil(Tf/Ts), ...
+    ScoreAveragingWindowLength=20, ...
+    Verbose=false, ...
+    Plots="training-progress",...
+    StopTrainingCriteria="AverageReward",...
+    StopTrainingValue=800);
+
+
+ trainingStats = train(agent,env,trainOpts);
